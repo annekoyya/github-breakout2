@@ -4,8 +4,8 @@ on:
   push:
     branches: [ main, master ]
   schedule:
-    - cron: '0 0 * * *'  # Runs daily at midnight
-  workflow_dispatch:     # Allows manual trigger
+    - cron: '0 0 * * *'
+  workflow_dispatch:
 
 jobs:
   build-and-deploy:
@@ -19,36 +19,52 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
       
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
       - name: Fetch GitHub contributions
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mkdir -p game/data
+          # Create data directory
+          mkdir -p data
+          
+          # Get the current date and date from 365 days ago
+          END_DATE=$(date +%Y-%m-%d)
+          START_DATE=$(date -d "365 days ago" +%Y-%m-%d)
+          
+          # Fetch contributions using GitHub GraphQL API
           curl -L \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Content-Type: application/json" \
-            -d '{"query": "query { user(login: \"${{ github.repository_owner }}\") { contributionsCollection(from: \"'$(date -d "365 days ago" +%Y-%m-%d)'T00:00:00Z\" to: \"'$(date +%Y-%m-%d)'T23:59:59Z\") { contributionCalendar { totalContributions weeks { contributionDays { contributionCount date } } } } } }"}' \
+            -d '{
+              "query": "query { user(login: \"${{ github.repository_owner }}\") { contributionsCollection(from: \"'$START_DATE'T00:00:00Z\" to: \"'$END_DATE'T23:59:59Z\") { contributionCalendar { weeks { contributionDays { contributionCount date } } } } } }"
+            }' \
             https://api.github.com/graphql > contributions_raw.json
           
-          # Parse and format the contributions data
+          # Parse and format the data
           node -e "
-            const data = require('./contributions_raw.json');
-            const days = data.data.user.contributionsCollection.contributionCalendar.weeks
-              .flatMap(w => w.contributionDays)
-              .map(d => ({ date: d.date, count: d.contributionCount }));
-            require('fs').writeFileSync('game/data/contributions.json', JSON.stringify(days));
+            const fs = require('fs');
+            try {
+              const raw = JSON.parse(fs.readFileSync('contributions_raw.json', 'utf8'));
+              const days = raw.data.user.contributionsCollection.contributionCalendar.weeks
+                .flatMap(w => w.contributionDays)
+                .map(d => ({ date: d.date, count: d.contributionCount }));
+              fs.writeFileSync('data/contributions.json', JSON.stringify({ days: days }));
+              console.log('Saved ' + days.length + ' days of contribution data');
+            } catch(e) {
+              console.error('Error parsing data:', e);
+              process.exit(1);
+            }
           "
-      
-      - name: Commit contributions data
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add game/data/contributions.json
-          git diff --staged --quiet || git commit -m "Update contributions data [skip ci]"
-          git push
       
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./game
+          publish_dir: ./
           publish_branch: gh-pages
           force_orphan: true
+          exclude_assets: '.github,contributions_raw.json'
