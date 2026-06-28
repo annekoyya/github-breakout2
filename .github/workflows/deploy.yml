@@ -1,92 +1,54 @@
 name: Deploy GitHub Breakout Game
 
 on:
-  schedule:
-    - cron: "0 0 * * *"       # Refresh contribution data daily
-  workflow_dispatch:            # Run manually from Actions tab
   push:
-    branches: [main]
-
-permissions:
-  contents: write
-  pages: write
-  id-token: write
+    branches: [ main, master ]
+  schedule:
+    - cron: '0 0 * * *'  # Runs daily at midnight
+  workflow_dispatch:     # Allows manual trigger
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    
     steps:
-      # ── 1. Checkout ────────────────────────────────────────
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
-
-      # ── 2. Fetch contribution data from GitHub GraphQL API ──
-      - name: Fetch contribution data
+      
+      - name: Fetch GitHub contributions
         run: |
-          python3 - <<'PYEOF'
-          import json, urllib.request, os
-
-          username = os.environ.get("GITHUB_REPOSITORY_OWNER", "")
-          token    = os.environ.get("GITHUB_TOKEN", "")
-
-          query = """
-          query($u: String!) {
-            user(login: $u) {
-              contributionsCollection {
-                contributionCalendar {
-                  weeks {
-                    contributionDays {
-                      date
-                      contributionCount
-                    }
-                  }
-                }
-              }
-            }
-          }
-          """
-
-          payload = json.dumps({"query": query, "variables": {"u": username}}).encode()
-          req = urllib.request.Request(
-              "https://api.github.com/graphql",
-              data=payload,
-              headers={
-                  "Authorization": f"bearer {token}",
-                  "Content-Type": "application/json",
-                  "User-Agent": "github-breakout/1.0",
-              },
-              method="POST",
-          )
-
-          try:
-              with urllib.request.urlopen(req, timeout=15) as resp:
-                  data = json.loads(resp.read())
-              weeks = data["data"]["user"]["contributionsCollection"]["contributionCalendar"]["weeks"]
-              days = []
-              for week in weeks:
-                  for day in week["contributionDays"]:
-                      days.append({"date": day["date"], "count": day["contributionCount"]})
-              print(f"Fetched {len(days)} days for {username}")
-          except Exception as e:
-              print(f"Error fetching: {e} — using empty data")
-              days = []
-
-          os.makedirs("game", exist_ok=True)
-          with open("game/contributions.json", "w") as f:
-              json.dump({"username": username, "days": days}, f)
-
-          print("Written game/contributions.json")
-          PYEOF
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # ── 3. Deploy game folder to GitHub Pages ──────────────
+          mkdir -p game/data
+          curl -L \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"query": "query { user(login: \"${{ github.repository_owner }}\") { contributionsCollection(from: \"'$(date -d "365 days ago" +%Y-%m-%d)'T00:00:00Z\" to: \"'$(date +%Y-%m-%d)'T23:59:59Z\") { contributionCalendar { totalContributions weeks { contributionDays { contributionCount date } } } } } }"}' \
+            https://api.github.com/graphql > contributions_raw.json
+          
+          # Parse and format the contributions data
+          node -e "
+            const data = require('./contributions_raw.json');
+            const days = data.data.user.contributionsCollection.contributionCalendar.weeks
+              .flatMap(w => w.contributionDays)
+              .map(d => ({ date: d.date, count: d.contributionCount }));
+            require('fs').writeFileSync('game/data/contributions.json', JSON.stringify(days));
+          "
+      
+      - name: Commit contributions data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add game/data/contributions.json
+          git diff --staged --quiet || git commit -m "Update contributions data [skip ci]"
+          git push
+      
       - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v4
+        uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./game
           publish_branch: gh-pages
           force_orphan: true
-          commit_message: "chore: update breakout game data [skip ci]"
